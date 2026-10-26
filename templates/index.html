@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TriageLoop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">∿</div>
+    <div><h1>TriageLoop</h1><p>Emergency Care Intelligence</p></div>
+  </div>
+  <div class="topbar-right">
+    <span class="sim-pill"><span class="dot"></span>Simulation active</span>
+    <div class="clock"><div id="clock-date">—</div><div id="clock-time">—</div></div>
+    <div class="user"><span class="avatar"></span>Clinician ▾</div>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar card">
+    <div class="label">SIMULATION CONTROLS</div>
+    <button class="btn-control" data-action="advance">◷ Advance 10 min</button>
+    <button class="btn-control" data-action="ct_down">◉ CT down 60 min</button>
+    <button class="btn-control" data-action="arrivals">♣ Add 5 arrivals</button>
+    <button class="btn-control" data-action="scenario" id="scenario-btn">☷ Scenario: Normal</button>
+    <hr>
+    <nav>
+      <a href="#" data-view="dashboard" class="active"><span class="nav-ico diamond"></span>Dashboard</a>
+      <a href="#" data-view="queue"><span class="nav-ico">♟</span>Patient Queue</a>
+      <a href="#" data-view="resources"><span class="nav-ico">▥</span>Resources</a>
+      <a href="#" data-view="eventlog"><span class="nav-ico">☰</span>Event Log</a>
+      <a href="#" data-view="settings"><span class="nav-ico">⚙</span>Settings</a>
+    </nav>
+    <div class="sim-mode"><span class="dot green"></span>Simulation mode</div>
+  </aside>
+
+  <main>
+    <!-- KPI row -->
+    <section class="kpis">
+      <div class="card kpi"><div class="kpi-head"><span class="ico blue">♧</span>Patients waiting</div>
+        <div class="kpi-val" id="k-waiting">0</div><div class="kpi-sub">In queue</div></div>
+      <div class="card kpi"><div class="kpi-head"><span class="ico red">▲</span>Priority flags</div>
+        <div class="kpi-val red" id="k-flags">0</div><div class="kpi-sub">Require review</div></div>
+      <div class="card kpi"><div class="kpi-head"><span class="ico blue">◷</span>Average wait time</div>
+        <div class="kpi-val" id="k-wait">0 min</div><div class="kpi-sub">(simulated)</div></div>
+      <div class="card kpi"><div class="kpi-head"><span class="ico blue">▤</span>Resources available</div>
+        <div class="kpi-val" id="k-res">0/3</div><div class="kpi-sub">CT / Beds / Lab</div></div>
+    </section>
+
+    <div class="grid" id="view-dashboard">
+      <div class="col-main">
+        <section class="card" id="queue-card">
+          <div class="card-head">
+            <h2>Patient Queue <small>(clinician order)</small></h2>
+            <div class="tools">
+              <input id="search" placeholder="⌕  Search patient...">
+              <select id="filter">
+                <option value="all">▽ Filter: All</option>
+                <option value="urgent">Urgent review</option>
+                <option value="reassess">Reassess soon</option>
+                <option value="stable">Stable</option>
+              </select>
+            </div>
+          </div>
+          <div id="queue"></div>
+        </section>
+
+        <section class="card arch">
+          <h3>♲ Architecture &amp; Data Flow</h3>
+          <div class="flow">
+            <div class="node blue"><b>◉ Event sources</b><span>Vitals, labs, arrivals</span></div><i>→</i>
+            <div class="node blue"><b>▤ Append-only event log</b><span>Record events</span></div><i>→</i>
+            <div class="node blue"><b>⟳ Rebuild state</b><span>Replay by timestamp</span></div><i>→</i>
+            <div class="node orange"><b>⚠ Flags</b><span>System layer</span></div><i>→</i>
+            <div class="node green"><b>▣ Dashboard</b><span>Clinician view</span></div>
+          </div>
+          <div class="flow-down"><i>↕</i><div class="node blue human"><b>♟ Clinician decision</b><span>Human layer</span></div></div>
+        </section>
+      </div>
+
+      <div class="col-side">
+        <section class="card" id="resources-card">
+          <div class="card-head"><h2>Resources</h2><a href="#" data-view="resources">View all</a></div>
+          <div class="res-grid" id="resources"></div>
+          <div class="impact"><b>♧ Resource impact</b><span id="impact"></span></div>
+        </section>
+
+        <section class="card why" id="why"></section>
+
+        <section class="card">
+          <div class="card-head"><h3>♧ Recent events</h3><a href="#" data-view="eventlog">View all</a></div>
+          <div id="recent"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Event log full view -->
+    <section class="card hidden" id="view-eventlog">
+      <div class="card-head"><h2>Event Log <small>(append-only, newest first)</small></h2></div>
+      <table class="log"><thead><tr><th>#</th><th>Time</th><th>Type</th><th>Event</th><th>Detail</th><th>Ref</th></tr></thead>
+        <tbody id="log-body"></tbody></table>
+    </section>
+
+    <!-- Settings view -->
+    <section class="card hidden" id="view-settings">
+      <h2>Settings</h2>
+      <p class="muted">Reset rebuilds the event log from the current scenario's seed events.</p>
+      <button class="btn primary" data-action="reset">Reset simulation</button>
+    </section>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="modal hidden" id="modal">
+  <div class="modal-box card">
+    <div class="card-head"><h2 id="modal-title"></h2><button class="btn" id="modal-close">✕</button></div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
