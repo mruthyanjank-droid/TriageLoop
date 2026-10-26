@@ -1,13 +1,5 @@
 __pycache__/
 .pytest_cache/
-<<<<<<< HEAD
-.venv/
-__pycache__/
-*.pyc
-data/events.jsonl
-.pytest_cache/
-=======
 *.py[cod]
 .venv/
 venv/
->>>>>>> origin/main
