@@ -3,6 +3,8 @@
 Run:  python app.py   then open http://127.0.0.1:5000
 """
 import os
+import threading
+
 from flask import Flask, jsonify, render_template, request
 
 from dashboard_engine import EventLog, rebuild, ranked_queue, sim_time, simulator
@@ -101,15 +103,54 @@ def api_patient(pid):
     return jsonify({"pid": pid, "history": [describe(e) for e in p.history]})
 
 
+LOCK = threading.Lock()
+MAX_MINUTES, MAX_ARRIVALS = 240, 20
+
+
+class ApiError(Exception):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.message, self.status = message, status
+
+
+@app.errorhandler(ApiError)
+def handle_api_error(e):
+    return jsonify({"error": e.message}), e.status
+
+
+def get_int(body, key, default, lo, hi):
+    try:
+        n = int(body.get(key, default))
+    except (TypeError, ValueError):
+        raise ApiError(f"{key} must be a whole number")
+    if not lo <= n <= hi:
+        raise ApiError(f"{key} must be between {lo} and {hi}")
+    return n
+
+
+@app.before_request
+def require_json():
+    if request.method == "POST" and request.path.startswith("/api/action/"):
+        if not request.is_json:
+            raise ApiError("Content-Type must be application/json", 415)
+        if not isinstance(request.get_json(silent=True), dict):
+            raise ApiError("Body must be a JSON object")
+
+
 @app.post("/api/action/<name>")
 def api_action(name):
+    with LOCK:
+        return _do_action(name)
+
+
+def _do_action(name):
     body = request.get_json(silent=True) or {}
     if name == "advance":
-        simulator.advance(log, int(body.get("minutes", 10)))
+        simulator.advance(log, get_int(body, "minutes", 10, 1, MAX_MINUTES))
     elif name == "ct_down":
-        simulator.ct_down(log, int(body.get("minutes", 60)))
+        simulator.ct_down(log, get_int(body, "minutes", 60, 1, MAX_MINUTES))
     elif name == "arrivals":
-        simulator.add_arrivals(log, int(body.get("count", 5)))
+        simulator.add_arrivals(log, get_int(body, "count", 5, 1, MAX_ARRIVALS))
     elif name == "scenario":
         cur = simulator.SCENARIOS.index(app.config["SCENARIO"])
         app.config["SCENARIO"] = simulator.SCENARIOS[(cur + 1) % len(simulator.SCENARIOS)]
@@ -117,14 +158,18 @@ def api_action(name):
     elif name == "reset":
         simulator.reset(log, app.config["SCENARIO"])
     elif name == "review":
+        pid = body.get("pid")
+        if not isinstance(pid, str) or not pid.strip():
+            raise ApiError("pid is required")
+        note = str(body.get("note", "Reviewed by clinician"))[:200]
         try:
-            simulator.clinician_review(log, body["pid"], body.get("note", "Reviewed by clinician"))
+            simulator.clinician_review(log, pid, note)
         except KeyError:
-            return jsonify({"error": "unknown patient"}), 404
+            raise ApiError("unknown patient", 404)
     else:
-        return jsonify({"error": f"unknown action {name}"}), 400
+        raise ApiError(f"unknown action {name}")
     return jsonify(snapshot())
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=os.environ.get("FLASK_DEBUG") == "1", use_reloader=False)
