@@ -129,7 +129,6 @@ def get_int(body, key, default, lo, hi):
     if not lo <= n <= hi:
         raise ApiError(f"{key} must be between {lo} and {hi}")
     return n
-, 
 
 @app.before_request
 def require_json():
