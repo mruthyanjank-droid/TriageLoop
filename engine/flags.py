@@ -1,73 +1,111 @@
-"""Flag rules. The system suggests; the clinician decides.
+"""Flags computed from PatientState. Every flag has a color and a 'why'.
+Flags are advisory only; they never change a patient's level."""
+from __future__ import annotations
 
-Rules are deliberately simple and explainable so every flag has a reason.
-"""
-from .state import State, Patient
+from dataclasses import dataclass
+from datetime import datetime
 
-# Minutes before reassessment is due, by ESI level
-REASSESS_TARGET = {1: 0, 2: 30, 3: 60, 4: 120, 5: 240}
-MINUTES_PER_SCAN = 30   # rough CT throughput, per patient ahead in queue
-MINUTES_PER_LAB = 20
+from .config import CONFIG
+from .scoring import score_vitals
+from .state import PatientState
 
-
-def wait_minutes(p: Patient, now: int) -> int:
-    return now - (p.last_review if p.last_review is not None else p.arrival)
-
-
-def resource_delay(state: State, p: Patient, need: str) -> int | None:
-    """Estimated minutes until patient can get the resource, or None if no delay."""
-    r = state.resources[need]
-    remaining = (r.until - state.now) if r.until is not None else 0
-    queue = sorted((q for q in state.patients.values() if need in q.needs),
-                   key=lambda q: (q.esi, q.arrival))
-    ahead = [q.pid for q in queue].index(p.pid)
-    per = MINUTES_PER_SCAN if need == "CT" else MINUTES_PER_LAB
-    if r.status == "Offline":
-        return remaining + (ahead + 1) * per
-    if r.status == "Busy":
-        return max(remaining, 0) + ahead * per or None
-    return None
+VITALS_TREND = "vitals_trend"
+RESOURCE_DELAY = "resource_delay"
+REASSESS_OVERDUE = "reassess_overdue"
 
 
-def evaluate(state: State, p: Patient) -> dict:
-    reasons = []
-    rise = p.news2 - p.baseline_news2
-    if rise >= 2:
-        reasons.append({"kind": "danger",
-                        "text": f"NEWS2 rose {p.baseline_news2} → {p.news2}",
-                        "why": f"NEWS2 increased from {p.baseline_news2} to {p.news2}."})
-
-    for need in p.needs:
-        d = resource_delay(state, p, need)
-        if d:
-            r = state.resources[need]
-            word = "unavailable" if r.status == "Offline" else "delayed"
-            reasons.append({"kind": "warn",
-                            "text": f"{need} {word} ~{d} min",
-                            "why": f"{need} availability is delayed."})
-
-    wait = wait_minutes(p, state.now)
-    target = REASSESS_TARGET.get(p.esi, 60)
-    if wait > target:
-        reasons.append({"kind": "warn",
-                        "text": f"Reassessment overdue ({wait - target} min)",
-                        "why": "Reassessment target may be overdue."})
-
-    if (rise >= 2 and p.news2 >= 5) or p.news2 >= 7:
-        level = "urgent"
-    elif reasons:
-        level = "reassess"
-    else:
-        level = "stable"
-
-    return {"level": level, "reasons": reasons, "wait": wait, "rise": rise}
+@dataclass(frozen=True)
+class Flag:
+    key: str          # stable id used for dismiss/accept
+    kind: str
+    color: str        # "amber" | "red"
+    why: str
+    accepted: bool = False
 
 
-LEVEL_RANK = {"urgent": 0, "reassess": 1, "stable": 2}
+def _minutes(a: datetime, b: datetime) -> float:
+    return (b - a).total_seconds() / 60
 
 
-def ranked_queue(state: State) -> list[tuple[Patient, dict]]:
-    rows = [(p, evaluate(state, p)) for p in state.patients.values()]
-    rows.sort(key=lambda r: (LEVEL_RANK[r[1]["level"]], r[0].esi,
-                             -r[0].news2, -r[1]["wait"]))
-    return rows
+def _vitals_trend_flag(st: PatientState, cfg: dict) -> Flag | None:
+    if not st.vitals:
+        return None
+    window = st.vitals[-cfg["TREND_WINDOW"]:]
+    results = [score_vitals(v) for _, v in window]
+    first, latest = results[0], results[-1]
+    reasons, color = [], None
+
+    if latest.total >= cfg["SCORE_RED"]:
+        color = "red"
+        reasons.append(f"NEWS2 {latest.total} (red threshold {cfg['SCORE_RED']})")
+    elif latest.total >= cfg["SCORE_AMBER"]:
+        color = "amber"
+        reasons.append(f"NEWS2 {latest.total} (amber threshold {cfg['SCORE_AMBER']})")
+    elif latest.any_three:
+        color = "amber"
+        reasons.append("a single parameter scored 3")
+
+    rise = latest.total - first.total
+    if len(results) > 1 and rise >= cfg["TREND_SCORE_RISE"]:
+        color = color or "amber"
+        reasons.append(f"score rose {first.total} -> {latest.total} over last {len(results)} obs")
+
+    if color is None:
+        return None
+    vitals_now = window[-1][1]
+    drivers = ", ".join(f"{k}={vitals_now[k]} (+{s})" for k, s in latest.parts.items() if s > 0)
+    why = "; ".join(reasons) + (f". Drivers: {drivers}" if drivers else "")
+    if latest.missing:
+        why += f". Partial score, missing: {', '.join(latest.missing)}"
+    return Flag(VITALS_TREND, VITALS_TREND, color, why)
+
+
+def _resource_delay_flags(st: PatientState, now: datetime, cfg: dict) -> list[Flag]:
+    limit = cfg["RESOURCE_DELAY_MIN"]
+    out = []
+    for rid, (name, requested_ts) in st.pending_resources.items():
+        waited = _minutes(requested_ts, now)
+        if waited <= limit:
+            continue
+        color = "red" if waited >= limit * cfg["RESOURCE_RED_FACTOR"] else "amber"
+        why = f"{name} requested {waited:.0f} min ago, still not done (limit {limit} min)"
+        out.append(Flag(f"{RESOURCE_DELAY}:{rid}", RESOURCE_DELAY, color, why))
+    return out
+
+
+def _reassess_overdue_flag(st: PatientState, now: datetime, cfg: dict) -> Flag | None:
+    if st.level is None:
+        return None
+    since = st.last_assessed_ts or st.arrival_ts
+    if since is None:
+        return None
+    target = cfg["TARGET_MIN"][st.level]
+    elapsed = _minutes(since, now)
+    if elapsed <= target:
+        return None
+    color = "red" if elapsed >= target * cfg["OVERDUE_RED_FACTOR"] else "amber"
+    why = (f"Level {st.level} needs reassessment every {target} min; "
+           f"last assessed {elapsed:.0f} min ago ({elapsed - target:.0f} min overdue)")
+    return Flag(REASSESS_OVERDUE, REASSESS_OVERDUE, color, why)
+
+
+def all_flags(st: PatientState, now: datetime, config: dict | None = None) -> list[Flag]:
+    """Every currently-true flag, ignoring dismissals."""
+    cfg = config or CONFIG
+    flags = [_vitals_trend_flag(st, cfg), _reassess_overdue_flag(st, now, cfg)]
+    flags = [f for f in flags if f] + _resource_delay_flags(st, now, cfg)
+    return sorted(flags, key=lambda f: (f.color != "red", f.key))
+
+
+def flags_for(st: PatientState, now: datetime, config: dict | None = None) -> list[Flag]:
+    """Flags to show: dismissed ones are hidden until their expiry;
+    accepted ones are still shown but marked accepted."""
+    visible = []
+    for f in all_flags(st, now, config):
+        until = st.dismissed.get(f.key)
+        if until is not None and now < until:
+            continue
+        if f.key in st.accepted:
+            f = Flag(f.key, f.kind, f.color, f.why, accepted=True)
+        visible.append(f)
+    return visible

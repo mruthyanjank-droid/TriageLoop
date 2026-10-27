@@ -5,7 +5,7 @@ Run:  python app.py   then open http://127.0.0.1:5000
 import os
 from flask import Flask, jsonify, render_template, request
 
-from engine import EventLog, rebuild, ranked_queue, sim_time, simulator
+from dashboard_engine import EventLog, rebuild, ranked_queue, sim_time, simulator
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__)

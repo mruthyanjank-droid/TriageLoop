@@ -1,52 +1,78 @@
-"""Append-only event log.
+"""Event dataclass and an append-only EventLog that rejects duplicates."""
+from __future__ import annotations
 
-Every change in the system is recorded as an event. Nothing is ever edited
-or deleted; current state is always rebuilt by replaying events in order.
-"""
-import json
-import os
-import threading
-from datetime import datetime, timedelta
+import copy
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Iterator
 
-# Simulation clock: minutes are counted from this moment.
-SIM_START = datetime(2025, 9, 26, 9, 30)
+ARRIVAL = "ARRIVAL"
+VITALS = "VITALS"
+REASSESSED = "REASSESSED"
+RESOURCE_REQUESTED = "RESOURCE_REQUESTED"
+RESOURCE_COMPLETED = "RESOURCE_COMPLETED"
+CLINICIAN_LEVEL = "CLINICIAN_LEVEL"
+FLAG_DISMISSED = "FLAG_DISMISSED"
+FLAG_ACCEPTED = "FLAG_ACCEPTED"
 
 EVENT_TYPES = {
-    "patient_arrived",     # pid, esi, complaint, news2, needs[]
-    "vitals_updated",      # pid, news2, note
-    "resource_changed",    # resource, status, minutes
-    "lab_result",          # pid, note
-    "clock_advanced",      # minutes
-    "clinician_reviewed",  # pid, note
+    ARRIVAL, VITALS, REASSESSED, RESOURCE_REQUESTED, RESOURCE_COMPLETED,
+    CLINICIAN_LEVEL, FLAG_DISMISSED, FLAG_ACCEPTED,
 }
 
 
-def sim_time(minute: int) -> datetime:
-    return SIM_START + timedelta(minutes=minute)
+@dataclass
+class Event:
+    """One immutable fact about a patient. Identity is event_id."""
+    type: str
+    patient_id: str
+    ts: datetime
+    payload: dict[str, Any] = field(default_factory=dict)
+    event_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def __post_init__(self) -> None:
+        if self.type not in EVENT_TYPES:
+            raise ValueError(f"Unknown event type: {self.type}")
 
 
 class EventLog:
-    def __init__(self, path: str):
-        self.path = path
-        self._lock = threading.Lock()
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        if not os.path.exists(path):
-            open(path, "w", encoding="utf-8").close()
+    """Append-only log. An event whose event_id was already seen is ignored."""
 
-    def read_all(self) -> list[dict]:
-        with self._lock, open(self.path, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+    def __init__(self, events: list[Event] | None = None) -> None:
+        self._events: list[Event] = []
+        self._ids: set[str] = set()
+        for e in events or []:
+            self.append(e)
 
-    def append(self, etype: str, minute: int, **data) -> dict:
-        if etype not in EVENT_TYPES:
-            raise ValueError(f"Unknown event type: {etype}")
-        with self._lock:
-            seq = sum(1 for _ in open(self.path, encoding="utf-8")) + 1
-            event = {"seq": seq, "type": etype, "minute": minute, **data}
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event) + "\n")
-        return event
+    def append(self, event: Event) -> bool:
+        """Add an event. Returns False (and does nothing) for a duplicate event_id."""
+        if event.event_id in self._ids:
+            return False
+        self._ids.add(event.event_id)
+        self._events.append(event)
+        return True
 
-    def clear(self):
-        with self._lock:
-            open(self.path, "w", encoding="utf-8").close()
+    def extend(self, events: list[Event]) -> int:
+        """Add many events; returns how many were actually new."""
+        return sum(self.append(e) for e in events)
+
+    def for_patient(self, patient_id: str) -> list[Event]:
+        return [e for e in self._events if e.patient_id == patient_id]
+
+    @property
+    def events(self) -> tuple[Event, ...]:
+        return tuple(self._events)
+
+    def copy(self) -> "EventLog":
+        """Deep, independent copy (safe for what-if replays)."""
+        return EventLog(copy.deepcopy(self._events))
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    def __iter__(self) -> Iterator[Event]:
+        return iter(self._events)
+
+    def __contains__(self, event_id: object) -> bool:
+        return event_id in self._ids
