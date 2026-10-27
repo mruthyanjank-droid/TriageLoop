@@ -119,14 +119,17 @@ def handle_api_error(e):
 
 
 def get_int(body, key, default, lo, hi):
+    raw = body.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ApiError(f"{key} must be a whole number")
     try:
-        n = int(body.get(key, default))
-    except (TypeError, ValueError):
+        n = int(raw)
+    except ValueError:
         raise ApiError(f"{key} must be a whole number")
     if not lo <= n <= hi:
         raise ApiError(f"{key} must be between {lo} and {hi}")
     return n
-
+, 
 
 @app.before_request
 def require_json():
